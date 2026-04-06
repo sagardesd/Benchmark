@@ -114,6 +114,97 @@ vector<int> make_mostly_true() {
 }
 ```
 
+### The Benchmarking Harness and `main()`
+The `measure()` helper is a thin template wrapper — it calls the function once, records the wall time, and captures the result into a global sink so the compiler can't dead-code-eliminate the whole loop.
+ 
+```cpp
+struct Result {
+    string name;
+    string type;
+    double ms;
+};
+ 
+template<typename Func>
+Result measure(const string& name, const string& type,
+               Func f, const vector<int>& v) {
+    auto start = chrono::high_resolution_clock::now();
+    int64_t result = f(v);
+    auto end   = chrono::high_resolution_clock::now();
+ 
+    global_sink = result;  // prevent dead-code elimination
+ 
+    double ms = chrono::duration<double, milli>(end - start).count();
+    return {name, type, ms};
+}
+```
+ 
+`main()` wires everything together — generates the three datasets, runs every technique against each pattern, prints a colour-coded table to the terminal, and writes `results.csv` for the Python plotter.
+ 
+```cpp
+int main() {
+    cout << "Generating data...\n";
+ 
+    init_csv();  // write CSV header
+ 
+    auto random_data = make_random();
+    auto sorted_data = make_sorted();
+    auto mostly_true = make_mostly_true();
+ 
+    cout << "\nLegend:\n";
+    cout << YELLOW << "[branch]"     << RESET << "     = conditional jumps\n";
+    cout << BLUE   << "[branchless]" << RESET << " = arithmetic / masking\n";
+    cout << GREEN  << "fastest"      << RESET << ", "
+         << RED    << "slower than baseline" << RESET << "\n";
+ 
+    // ── RANDOM ──────────────────────────────────────────────
+    vector<Result> random_results = {
+        measure("if",             "branch",     sum_if,      random_data),
+        measure("ternary",        "branchless", sum_ternary, random_data),
+        measure("bool multiply",  "branchless", sum_boolmul, random_data),
+        measure("bitmask",        "branchless", sum_bitmask, random_data),
+        measure("lookup",         "branchless", sum_lookup,  random_data),
+        measure("builtin_expect", "branch",     sum_expect,  random_data),
+    };
+    print_results("RANDOM (Worst case)",
+                  "Uniform random (~50% unpredictable)",
+                  random_results);
+    save_csv("random", random_results);
+ 
+    // ── SORTED ──────────────────────────────────────────────
+    vector<Result> sorted_results = {
+        measure("if", "branch", sum_if, sorted_data),
+    };
+    print_results("SORTED (Best case)",
+                  "Sorted → predictable branches",
+                  sorted_results);
+    save_csv("sorted", sorted_results);
+ 
+    // ── MOSTLY TRUE ─────────────────────────────────────────
+    vector<Result> mostly_results = {
+        measure("if",             "branch",     sum_if,      mostly_true),
+        measure("ternary",        "branchless", sum_ternary, mostly_true),
+        measure("bool multiply",  "branchless", sum_boolmul, mostly_true),
+        measure("bitmask",        "branchless", sum_bitmask, mostly_true),
+        measure("lookup",         "branchless", sum_lookup,  mostly_true),
+        measure("builtin_expect", "branch",     sum_expect,  mostly_true),
+    };
+    print_results("MOSTLY TRUE (95%)",
+                  "Highly biased → predictor friendly",
+                  mostly_results);
+    save_csv("mostly_true", mostly_results);
+ 
+    return 0;
+}
+```
+ 
+A few things worth noticing in `main()`:
+ 
+- Sorted data only runs `if`. That's intentional — the point of the sorted test is to show how good the predictor gets when the data cooperates, so there's no need to run the branchless variants again. Their times don't change with data order.
+- `global_sink = result` in `measure()` is the anti-optimization guard. Without it, a sufficiently aggressive compiler can prove the output is unused and eliminate the entire benchmark body.
+- The CSV is opened fresh at startup via `init_csv()`, then appended per dataset via `save_csv()`. This means re-running always overwrites the previous results rather than accumulating stale rows.
+ 
+The `print_results()` function colours the output — green for the fastest result, red for anything slower than the `if` baseline, blue for branchless methods, yellow for branching ones. It makes the pattern obvious at a glance when you're running this in a terminal.
+
 ---
 
 ## Compiling and Running
